@@ -704,6 +704,7 @@ class ServerArgs:
     weight_loader_prefetch_checkpoints: bool = True
     weight_loader_prefetch_num_threads: int = 8
     enable_memory_saver: bool = False
+    weight_memory_policy: Literal["cpu_backup", "discard"] | None = None
     disable_cudagraph_memory_reserve: bool = False
     mla_disable_ragged: bool = False
 
@@ -716,6 +717,10 @@ class ServerArgs:
     # make the sharded o_proj / dense down_proj column-parallel on hidden so
     # no cross-rank reduction remains outside MoE (TP batch invariance).
     attn_head_tp_size: int | None = None
+    # Rows per rank the head-TP Lamport exchanges are prepared for. The
+    # scratch is allocated before graph capture, so larger forwards fall
+    # back to the generic all-to-all instead of growing it at runtime.
+    head_tp_exchange_max_rows: int = 256
     lm_head_tp_size: int | None = None
     tp_batch_invariant: Literal["none", "attn", "attn+dense"] = "none"
     dense_tp_size: int | None = None
@@ -759,6 +764,7 @@ class ServerArgs:
         return _SPEC_OVERSHOOT_SPANS * int(self.speculative_num_draft_tokens)
 
     def __post_init__(self):
+        self.validate_weight_memory_policy()
         self.resolve_basic_defaults()
         self.resolve_model_defaults()
         self.resolve_launcher_topology()
@@ -1215,6 +1221,8 @@ class ServerArgs:
         weights' quantization is checked once the checkpoint's is resolved
         (:meth:`validate_tp_batch_invariant_weights`).
         """
+        if self.head_tp_exchange_max_rows < 1:
+            raise ValueError("--head-tp-exchange-max-rows must be positive")
         attn = self.mapping.attn
         if attn.head_tp_serves_decode_only:
             # Head TP over attention-DP ranks serves absorbed decode rows
@@ -1758,6 +1766,19 @@ class ServerArgs:
                 f"{self.mapping.dense.tp_size!s}!",
             )
 
+        if (
+            self.all2all_backend == "deepep"
+            and self.deepep_mode == "normal"
+            and not self.enforce_eager
+        ):
+            # A decode graph captures the MoE's dispatch and combine. Only the
+            # low-latency legs replay; the normal dispatch reads its
+            # per-expert receive counts on the host, which a graph cannot
+            # capture (the prefill graph is off under DeepEP for the same
+            # reason).
+            self.enforce_eager = True
+            logger.info("CUDA graph is disabled under --deepep-mode normal")
+
     def resolve_numerics(self):
         """Fold the ``--numerics`` envelope into the individual switches.
 
@@ -1796,20 +1817,15 @@ class ServerArgs:
             self.enable_allreduce_fusion = False
             # The slot-order fold runs over the EP group inside the MoE leaf:
             # a K-split (MoE TP) down projection would need a second,
-            # rank-ordered fold after it, and DeepEP's all-to-all owns that
-            # exchange itself (and hands the leaf a NCCL group, not the EP
-            # device group the fold runs on).
+            # rank-ordered fold after it. Under --all2all-backend deepep the
+            # leaf must itself own the exchange and fold the routes in slot
+            # order: the MoE plan selects only a kernel declaring both traits
+            # and refuses the launch otherwise.
             if self.mapping.moe.tp_size != 1:
                 raise ValueError(
                     "--moe-combine-order slot needs MoE TP 1: a K-split down "
                     "projection would need a second, rank-ordered fold after "
                     f"the slot-order one (got --moe-tp-size {self.mapping.moe.tp_size})"
-                )
-            if self.all2all_backend == "deepep":
-                raise ValueError(
-                    "--moe-combine-order slot folds the routed outputs over the "
-                    "EP group inside the MoE leaf; --all2all-backend deepep "
-                    "performs that exchange itself and cannot be combined with it"
                 )
 
     def _resolve_rl_bitwise(self):
@@ -2031,6 +2047,26 @@ class ServerArgs:
                 raise ValueError(
                     "--enable-state-checkpoint-in-forward writes a checkpoint only "
                     "the prefix cache can reuse; it requires prefix caching"
+                )
+
+    def validate_weight_memory_policy(self):
+        """Memory saving chooses its weight semantics explicitly."""
+        if self.weight_memory_policy not in (None, "cpu_backup", "discard"):
+            raise ValueError("--weight-memory-policy must be cpu_backup or discard")
+        if self.enable_memory_saver and self.weight_memory_policy is None:
+            raise ValueError("--enable-memory-saver requires --weight-memory-policy")
+        if self.weight_memory_policy == "discard":
+            if not self.enable_memory_saver or self.model_update_config is None:
+                raise ValueError(
+                    "Weight discard requires memory saver and Model Updater configuration"
+                )
+            if self.model_update_draft_weights not in ("retain", "refresh"):
+                raise ValueError(
+                    "Weight discard requires an explicit draft update policy"
+                )
+            if self.quantization is not None or self.enable_eplb:
+                raise ValueError(
+                    "Weight discard currently requires unquantized weights without EPLB"
                 )
 
     def validate_model_update_options(self):
@@ -2279,6 +2315,7 @@ class ServerArgs:
             )
 
     def validate(self):
+        self.validate_weight_memory_policy()
         if self.low_latency_max_num_tokens_per_gpu <= 0:
             raise ValueError("--low-latency-max-num-tokens-per-gpu must be positive")
         if self.input_logprob_chunk_tokens <= 0:
@@ -3643,6 +3680,15 @@ class ServerArgs:
             help="Allow saving memory using release_memory_occupation and resume_memory_occupation",
         )
         parser.add_argument(
+            "--weight-memory-policy",
+            choices=["cpu_backup", "discard"],
+            default=None,
+            help=(
+                "Required with memory saver: back up weights to CPU, or discard "
+                "them until a complete SDK update. Frozen draft weights retain CPU backup."
+            ),
+        )
+        parser.add_argument(
             "--disable-cudagraph-memory-reserve",
             action="store_true",
             help="Do not reserve the projected CUDA-graph pool memory, nor what startup "
@@ -3708,6 +3754,16 @@ class ServerArgs:
             "the absorbed sparse prefill through the exchange). Defaults to the "
             "ranks holding the same rows: the attention TP size, or 1 "
             "(head-replicated) under --query-context-parallel-size.",
+        )
+        parser.add_argument(
+            "--head-tp-exchange-max-rows",
+            type=int,
+            default=ServerArgs.head_tp_exchange_max_rows,
+            help="Rows per rank the head-TP Lamport exchanges are prepared for "
+            "(the absorbed query, the latent attention output, and the TP-BI "
+            "o_proj rows). The symmetric-memory scratch is allocated before "
+            "graph capture; larger forwards fall back to the generic all-to-all. "
+            "Only used with --attn-head-tp-size > 1.",
         )
         parser.add_argument(
             "--lm-head-tp-size",

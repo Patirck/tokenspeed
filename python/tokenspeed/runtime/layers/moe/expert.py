@@ -62,6 +62,7 @@ from tokenspeed.runtime.layers.quantization.utils import (
     should_ignore_quant_layer,
 )
 from tokenspeed.runtime.utils.env import global_server_args_dict
+from tokenspeed.runtime.utils.torch_memory_saver_adapter import initialize_communication
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +379,8 @@ class MoELayer(torch.nn.Module):
             process_group = pg_manager.get_device_process_group(mapping.moe.ep_group)
         # --moe-combine-order: how a token's routed contributions meet across
         # the MoE TP-EP group (docs/design/numerics.md, alignment.trainer).
-        # ServerArgs already refused MoE TP > 1 and DeepEP under "slot".
+        # ServerArgs refuses MoE TP > 1 under "slot". Over DeepEP, the plan
+        # requires a leaf owning both the exchange and the slot-order fold.
         combine_order = global_server_args_dict["moe_combine_order"]
         self.combine_order: str = combine_order
         if combine_order == "slot" and self.ep_size > 1:
@@ -608,7 +610,9 @@ class MoELayer(torch.nn.Module):
 
         if self._quant_kind == "fp8_channel":
             check_fp8_channel_scales(module, self.prefix)
-        kernel_moe_process_weights(self.plan, module)
+        kernel_moe_process_weights(
+            self.plan, module, communication_initializer=initialize_communication
+        )
         self._weights_processed = True
 
     @property

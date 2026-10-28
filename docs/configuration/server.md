@@ -259,6 +259,12 @@ external rollout-engine address. Real rollout log probabilities require
 
 #### Releasing GPU memory (`--enable-memory-saver`)
 
+Set `--weight-memory-policy cpu_backup|discard` explicitly whenever
+`--enable-memory-saver` is enabled. The host Python package, native host and
+kernel package must be built from matching sources; an older native host is
+rejected before device initialization. See [weight memory policies](../serving/weight-memory.md)
+for the update contract and validation procedure.
+
 `POST /release_memory_occupation` frees GPU memory between rollouts so a
 trainer colocated on the same GPUs can use it; `POST
 /resume_memory_occupation` maps it back. Both take optional `tags`; a release
@@ -268,7 +274,7 @@ whatever is released:
 | Tag | Memory | On resume |
 | --- | --- | --- |
 | `kv_cache` | the cache arena's device regions | zeroed; a PD engine registers it with the transfer engine again |
-| `weights` | model and draft parameters | restored from their CPU backup |
+| `weights` | model and draft parameters | CPU backup, or remapped and invalid until a complete update; frozen draft allocations retain CPU backup |
 | `cuda_graph` | the decode CUDA graphs' memory pool | discarded; replays rewrite it |
 | `nccl` | NCCL communicator buffers (`ProcessGroupNCCL.suspend`); requires a PyTorch build with suspend support and NCCL 2.29.7 or later | resumed in place |
 
@@ -280,7 +286,11 @@ disaggregated engine finishes new requests with an abort. Weight updates are
 refused while `weights` or `nccl` is released, so the RL order is: release
 everything, train, resume `["nccl", "cuda_graph", "weights"]` (without `nccl`
 on an older NCCL), push the new
-weights (`update_weights_from_mooncake`), resume `["kv_cache"]`. Sparse KV
+weights (`update_weights_from_mooncake`), resume `["kv_cache"]`. With `discard`,
+KV must be released before the weight update and cannot resume until every rank
+has loaded and committed the complete version; a failed update requires a
+restart. A bare resume of all tags immediately after discard is therefore
+invalid. Sparse KV
 offload keeps its pinned Host history mapped across a release and zeroes it on
 resume. Other device memory (input buffers, communication workspaces such as
 symmetric memory or DeepEP buffers, the prefill CUDA graphs) stays resident.

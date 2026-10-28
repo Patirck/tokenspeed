@@ -78,6 +78,7 @@ def make_engine(Engine, model, *, enable_prefix_caching):
         disable_autotune=True,
         model=model,
         enable_memory_saver=True,
+        weight_memory_policy="cpu_backup",
         enable_prefix_caching=enable_prefix_caching,
         # KVStore requires prefix caching (mutually exclusive with it disabled),
         # so the KV-release config (prefix caching off) must also disable KVStore.
@@ -228,6 +229,7 @@ def main() -> None:
             disable_autotune=True,
             model=model,
             enable_memory_saver=True,
+            weight_memory_policy="cpu_backup",
             enable_prefix_caching=False,
             speculative_algorithm=os.environ.get("TOKENSPEED_SPEC_ALGO", "EAGLE3"),
             speculative_draft_model_path=draft,
