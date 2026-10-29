@@ -37,6 +37,10 @@ import pytest
 import torch
 from fastapi.testclient import TestClient
 
+from tokenspeed.runtime.distributed.mapping import Mapping
+from tokenspeed.runtime.distributed.process_group_manager import (
+    process_group_manager as pg_manager,
+)
 from tokenspeed.runtime.engine.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromMooncakeReqInput,
@@ -365,6 +369,7 @@ def test_adapter_rejects_an_unknown_engine_type(sdk):
 
 def _runner(server_args, global_rank=3, is_draft_worker=False):
     runner = object.__new__(ModelRunner)
+    runner.mapping = Mapping(rank=global_rank, world_size=8)
     runner.server_args = server_args
     runner.global_rank = global_rank
     runner.gpu_id = 0
@@ -676,3 +681,10 @@ def test_host_bootstrap_checks_the_actual_binary_protocol_before_device_build(
     finally:
         receiver.close()
         sender.close()
+
+
+@pytest.fixture(autouse=True)
+def _local_weight_update_group(monkeypatch):
+    # These CPU adapter tests lack a process group; the multiprocess session
+    # regression exercises real rank agreement and collective post-load hooks.
+    monkeypatch.setattr(pg_manager, "get_process_group", lambda *a, **kw: None)

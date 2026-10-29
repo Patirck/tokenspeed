@@ -34,8 +34,10 @@ discard policy and receive the new target version. `refresh` instead requires
 complete target **and** draft streams before either model derives new state.
 A trainer that does not publish draft weights must use `retain`.
 
-DeepEP's persistent native communication allocations are deferred until the
-weight allocation region has exited. This avoids nested CUDA memory pools and
+DeepEP and attention head-TP exchange allocations are deferred until the
+weight allocation region has exited. Head-TP peer address tables and Lamport
+counters share the communication lifetime; preserving only model tensors does
+not preserve this backend-owned state. This avoids nested CUDA memory pools and
 keeps communication storage outside the weight region. They remain resident,
 including across discard; their memory must be included in the training headroom. NCCL release is independent and
 optional. No NCCL suspend feature is required when its tag is omitted.
@@ -65,7 +67,9 @@ not suspend NCCL or release its communication buffers.
    storage and immutable constants; target parameters remain invalid.
 5. Apply the complete SDK update to every prefill/decode engine. Each model
    checks for missing, duplicate, unexpected and unconsumed checkpoint inputs.
-   All models validate coverage before any derived state is rebuilt.
+   All models validate coverage and all ranks agree on receiving success before
+   any derived state is rebuilt. A stream or coverage failure aborts the session
+   on every rank, so peers do not enter post-load collectives without it.
 6. Every rank confirms the final result, including namespace publication. Only
    this commit makes locally loaded weights usable. A failure poisons all
    ranks; restart the deployment rather than attempting a partial wake.

@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from tokenspeed.runtime.configs.numerics import require_verified_numerics
+from tokenspeed.runtime.distributed.process_group_manager import (
+    process_group_manager as pg_manager,
+)
 from tokenspeed.runtime.execution.model_update import (
     ModelUpdateAdapter,
     model_update_adapter_for,
@@ -466,7 +469,9 @@ class ModelRunner:
             # itself and raises at its end; this wrap covers the models that
             # take no session (multimodal wrappers).
             rejected: list[str] = []
-            with weight_update_session([self.model], require_complete=False):
+            with weight_update_session(
+                [self.model], require_complete=False, cpu_group=None
+            ):
                 self.model.load_weights(record_non_unit_kv_scales(_recv(), rejected))
             torch.cuda.synchronize(device)
             if rejected:
@@ -507,7 +512,13 @@ class ModelRunner:
                 "--model-update-config (target runner only)"
             )
         try:
-            with weight_update_session(models, require_complete=require_complete):
+            with weight_update_session(
+                models,
+                require_complete=require_complete,
+                cpu_group=pg_manager.get_process_group(
+                    "gloo", self.mapping.world_group
+                ),
+            ):
                 result = self.model_update.update(models, version)
             torch.cuda.synchronize(torch.device(f"cuda:{self.gpu_id}"))
             return True, f"applied model version {version}: {result}"
@@ -593,7 +604,9 @@ class ModelRunner:
 
             # Same session and KV-cache scale screen as a distributed load.
             rejected: list[str] = []
-            with weight_update_session([self.model], require_complete=False):
+            with weight_update_session(
+                [self.model], require_complete=False, cpu_group=None
+            ):
                 self.model.load_weights(
                     record_non_unit_kv_scales(
                         _counted(),
