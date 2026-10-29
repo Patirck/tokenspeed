@@ -129,5 +129,7 @@ wire_struct! {
         pub kv_cache_max_concurrency: Option<f64> = None,
         /// KV event publisher configuration.
         pub kv_events_config: Option<Dict<Value, Value>> = None,
+        /// Request kinds supported by this engine; absent on older peers.
+        pub request_types: Vec<String> = Vec::new(),
     }
 }

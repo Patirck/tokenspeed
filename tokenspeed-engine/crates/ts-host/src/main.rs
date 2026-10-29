@@ -548,7 +548,10 @@ fn serve(args: &Args) -> Result<(), HostError> {
 
     // The replica's first member speaks for it.
     let transport = if ranks.replica.index() == 0 {
-        let ready: EngineCoreReadyResponse = ts_wire::decode_bytes(&config.ready_response)?;
+        let mut ready: EngineCoreReadyResponse = ts_wire::decode_bytes(&config.ready_response)?;
+        // The native scheduler already handles all three request kinds. New
+        // clients check this declaration before sending control operations.
+        ready.request_types = ["add", "abort", "control"].map(str::to_owned).to_vec();
         Some(EngineTransport::connect(
             &config.handshake_address,
             config.engine_index,

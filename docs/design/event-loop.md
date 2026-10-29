@@ -44,6 +44,12 @@ frontend is `tokenspeed_engine.Frontend` (`ts-py` over `ts-client`) under
 event loop. Their first rank binds the request channel its frontend pushes
 encode requests to; headless, that is the address an engine rank would dial.
 
+The scheduler host declares `request_types: ["add", "abort", "control"]` in
+its ready response. Clients can check control support before sending memory
+or weight operations. This is an optional map field: older ready responses
+decode with no declaration, and older clients ignore the additional field.
+The encoder role does not inherit the scheduler's declaration.
+
 ## Principle 1: the loop runs no GPU work, and cannot reach any
 
 The event loop is the **control plane**. The forward thread is the **data

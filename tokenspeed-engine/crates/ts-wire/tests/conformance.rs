@@ -641,31 +641,55 @@ fn handshake_init() {
 
 #[test]
 fn handshake_ready_response() {
-    check(
-        "handshake_ready_response",
-        EngineCoreReadyResponse {
-            max_model_len: 32768,
-            num_gpu_blocks: 12345,
-            prefix_granularity: 64,
-            dp_stats_address: Some(s("tcp://127.0.0.1:21005")),
-            dtype: s("float16"),
-            multimodal_encoder_dtype: Some(s("bfloat16")),
-            vllm_version: s("tokenspeed-0.0.0"),
-            world_size: 8,
-            data_parallel_size: 2,
-            tensor_parallel_size: 4,
-            pipeline_parallel_size: 3,
-            decode_context_parallel_size: 5,
-            data_parallel_rank: 1,
-            max_num_seqs: 256,
-            max_num_batched_tokens: 8192,
-            instance_id: s("model-a"),
-            kv_cache_size_tokens: Some(790080),
-            kv_cache_max_concurrency: Some(24.1),
-            kv_events_config: Some(Dict(vec![
-                ("publisher".into(), "zmq".into()),
-                ("topic".into(), "".into()),
-            ])),
-        },
+    let expected = EngineCoreReadyResponse {
+        request_types: Vec::new(),
+        max_model_len: 32768,
+        num_gpu_blocks: 12345,
+        prefix_granularity: 64,
+        dp_stats_address: Some(s("tcp://127.0.0.1:21005")),
+        dtype: s("float16"),
+        multimodal_encoder_dtype: Some(s("bfloat16")),
+        vllm_version: s("tokenspeed-0.0.0"),
+        world_size: 8,
+        data_parallel_size: 2,
+        tensor_parallel_size: 4,
+        pipeline_parallel_size: 3,
+        decode_context_parallel_size: 5,
+        data_parallel_rank: 1,
+        max_num_seqs: 256,
+        max_num_batched_tokens: 8192,
+        instance_id: s("model-a"),
+        kv_cache_size_tokens: Some(790080),
+        kv_cache_max_concurrency: Some(24.1),
+        kv_events_config: Some(Dict(vec![
+            ("publisher".into(), "zmq".into()),
+            ("topic".into(), "".into()),
+        ])),
+    };
+    // Old Python peers omit the optional map field. New peers must decode it
+    // without moving any existing field or requiring a Python wire upgrade.
+    assert_eq!(
+        decode_frames::<EngineCoreReadyResponse>(&fixture("handshake_ready_response")).unwrap(),
+        expected
+    );
+    let mut advertised = expected;
+    advertised.request_types = ["add", "abort", "control"].map(str::to_owned).to_vec();
+    let frames = encode_frames(&advertised);
+    let decoded: EngineCoreReadyResponse = decode_frames(&frames).unwrap();
+    assert_eq!(decoded, advertised);
+    let dynamic: Value = decode_frames(&frames).unwrap();
+    let Value::Map(fields) = dynamic else {
+        panic!("ready must remain a map")
+    };
+    assert!(
+        fields
+            .iter()
+            .any(|(key, value)| key == &Value::from("request_types")
+                && value
+                    == &Value::Array(vec![
+                        Value::from("add"),
+                        Value::from("abort"),
+                        Value::from("control")
+                    ]))
     );
 }
